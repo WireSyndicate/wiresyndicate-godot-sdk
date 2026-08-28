@@ -133,3 +133,33 @@ func _apply_texture(image: Image) -> void:
 	
 	target_mesh.set_surface_override_material(surface_index, material)
 	print("[WireSyndicate] Successfully applied dynamic texture to surface ", surface_index)
+	_dispatch_telemetry()
+
+func _dispatch_telemetry() -> void:
+	var vram_bytes = OS.get_static_memory_usage()
+	var vram_mb = vram_bytes / (1024.0 * 1024.0)
+	
+	var session_id = _wire_syndicate.get("session_id") if "session_id" in _wire_syndicate else ""
+	if session_id == null or session_id == "":
+		session_id = "00000000-0000-0000-0000-000000000000"
+		
+	var payload = {
+		"placement_id": placement_id,
+		"session_id": session_id,
+		"engine": "godot",
+		"vram_allocated_mb": vram_mb,
+		"gc_triggered": false
+	}
+	
+	var json_string = JSON.stringify(payload)
+	var url = _wire_syndicate.api_base_url.trim_suffix("/") + "/api/v1/telemetry/client"
+	
+	var http_request = HTTPRequest.new()
+	add_child(http_request)
+	http_request.request_completed.connect(func(res, code, headers, body): http_request.queue_free())
+	
+	var request_headers = ["Content-Type: application/json"]
+	var err = http_request.request(url, request_headers, HTTPClient.METHOD_POST, json_string)
+	if err != OK:
+		push_warning("[WireSyndicate] Failed to initiate telemetry dispatch.")
+		http_request.queue_free()
