@@ -7,10 +7,22 @@ extends Node
 var _session_token: String = ""
 var _handshake_secret: String = ""
 var _is_authenticated: bool = false
+var session_id: String = "00000000-0000-0000-0000-000000000000"
+
+var telemetry_batch: Array = []
+var _batch_timer: float = 0.0
 
 func _ready():
+	# Attempt to generate a pseudo-UUID for session
+	session_id = str(hash(Time.get_unix_time_from_system())) + "-" + str(randi())
+	
 	if network_key != "":
 		authenticate(network_key)
+
+func _process(delta: float) -> void:
+	_batch_timer += delta
+	if telemetry_batch.size() > 0 and (_batch_timer >= 5.0 or telemetry_batch.size() >= 500):
+		_flush_telemetry_batch()
 
 ## Performs the zero-trust handshake with the WireSyndicate Edge Delivery Node.
 func authenticate(key: String) -> void:
@@ -61,46 +73,70 @@ func _on_handshake_completed(result: int, response_code: int, headers: PackedStr
 		_handshake_secret = response.get("handshake_secret", "")
 		_is_authenticated = true
 		print("[WireSyndicate] Zero-Trust Handshake successful. Edge network synced.")
+		_drain_dlq()
 	else:
 		push_error("[WireSyndicate] FATAL: Handshake payload success flag missing or false.")
 
 const DLQ_PATH = "user://ws_telemetry_dlq.json"
 
-## Dispatches an impression to the telemetry endpoint.
-func dispatch_impression(impression_token: String, placement_id: String, bid_id: String, duration_seconds: float, screen_coverage: float) -> void:
+## Dispatches an impression to the telemetry endpoint via batching
+func dispatch_impression(placement_id: String, campaign_id: String, bid_id: String, origin: Vector3, frustum: Array) -> void:
 	if not _is_authenticated:
 		push_error("[WireSyndicate] Cannot dispatch telemetry: SDK lacks a valid session token.")
 		return
 		
-	var duration_ms: int = roundi(duration_seconds * 1000.0)
+	var impression_id = str(randi()) + str(Time.get_ticks_msec())
+	var rendered_at = Time.get_datetime_string_from_system(true, true) + "Z"
+	
+	var player_origin_geom = "SRID=0;POINT Z(%f %f %f)" % [origin.x, origin.y, origin.z]
+	var frustum_geom = "SRID=0;POLYGON Z(("
+	if frustum.size() >= 3:
+		for i in range(frustum.size()):
+			frustum_geom += "%f %f %f, " % [frustum[i].x, frustum[i].y, frustum[i].z]
+		frustum_geom += "%f %f %f" % [frustum[0].x, frustum[0].y, frustum[0].z]
+	else:
+		frustum_geom += "0 0 0, 1 0 0, 1 1 0, 0 1 0, 0 0 0"
+	frustum_geom += "))"
+	
+	var payload_to_sign = impression_id + ":" + placement_id + ":" + campaign_id + ":" + bid_id + ":" + rendered_at
+	var client_signature = WSCryptography.generate_hmac_sha256(payload_to_sign, _handshake_secret)
 	
 	var payload_dict = {
-		"impression_token": impression_token,
-		"placementId": placement_id,
+		"impression_id": impression_id,
+		"placement_id": placement_id,
+		"campaign_id": campaign_id,
 		"bid_id": bid_id,
-		"durationMs": duration_ms,
-		"screenCoverage": screen_coverage
+		"session_id": session_id,
+		"rendered_at": rendered_at,
+		"player_origin_geom": player_origin_geom,
+		"camera_frustum_geom": frustum_geom,
+		"client_signature": client_signature
 	}
 	
-	# Create a copy for HMAC generation excluding the signature key
-	var pre_sign_json = JSON.stringify(payload_dict)
-	var signature = WSCryptography.generate_hmac_sha256(pre_sign_json, _handshake_secret)
+	telemetry_batch.append(payload_dict)
+
+func _flush_telemetry_batch() -> void:
+	if not _is_authenticated:
+		return
+		
+	var batch_copy = telemetry_batch.duplicate(true)
+	telemetry_batch.clear()
+	_batch_timer = 0.0
 	
-	# CRITICAL CONTRACT: Inject signature into JSON payload directly
-	payload_dict["client_signature"] = signature
-	var final_json_payload = JSON.stringify(payload_dict)
+	var final_json_payload = JSON.stringify(batch_copy)
+	var transport_signature = WSCryptography.generate_hmac_sha256(final_json_payload, _handshake_secret)
 	
 	var url = api_base_url.trim_suffix("/") + "/api/v1/telemetry/impressions"
 	
 	var headers = [
 		"Authorization: Bearer " + _session_token,
-		"Content-Type: application/json"
+		"Content-Type: application/json",
+		"X-WS-Signature: " + transport_signature
 	]
 	
 	var http_request = _get_available_http_request()
+	var callable = Callable(self, "_on_telemetry_completed").bind(http_request, batch_copy)
 	
-	# We bind the original payload in case we need to queue it offline
-	var callable = Callable(self, "_on_telemetry_completed").bind(http_request, payload_dict)
 	if not http_request.request_completed.is_connected(callable):
 		for conn in http_request.request_completed.get_connections():
 			http_request.request_completed.disconnect(conn.callable)
@@ -109,7 +145,8 @@ func dispatch_impression(impression_token: String, placement_id: String, bid_id:
 	var error = http_request.request(url, headers, HTTPClient.METHOD_POST, final_json_payload)
 	if error != OK:
 		printerr("[WireSyndicate] Failed to initiate telemetry HTTP request. Caching payload.")
-		_cache_failed_payload(payload_dict)
+		for item in batch_copy:
+			_cache_failed_payload(item)
 		_release_http_request(http_request)
 
 func _get_available_http_request() -> HTTPRequest:
@@ -125,12 +162,13 @@ func _get_available_http_request() -> HTTPRequest:
 func _release_http_request(http_request: HTTPRequest) -> void:
 	http_request.cancel_request()
 
-func _on_telemetry_completed(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, http_request: HTTPRequest, original_payload: Dictionary) -> void:
+func _on_telemetry_completed(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray, http_request: HTTPRequest, original_batch: Array) -> void:
 	if result == HTTPRequest.RESULT_SUCCESS and response_code == 202:
-		print("[WireSyndicate] Telemetry queued successfully at Edge (202 Accepted).")
+		print("[WireSyndicate] Telemetry batch queued successfully at Edge (202 Accepted).")
 	else:
 		printerr("[WireSyndicate] Edge Ingestion Failed (HTTP ", response_code, "). Triggering local fallback queue.")
-		_cache_failed_payload(original_payload)
+		for item in original_batch:
+			_cache_failed_payload(item)
 
 # --- Offline Dead Letter Queue (DLQ) Architecture ---
 
@@ -160,3 +198,11 @@ func _save_dlq(cache: Array):
 	if file:
 		file.store_string(JSON.stringify(cache))
 		file.close()
+
+func _drain_dlq():
+	var cache = _load_dlq()
+	if cache.size() > 0:
+		print("[WireSyndicate] Draining ", cache.size(), " items from DLQ.")
+		for item in cache:
+			telemetry_batch.append(item)
+		_save_dlq([])
