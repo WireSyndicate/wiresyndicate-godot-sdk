@@ -80,7 +80,10 @@ func _on_handshake_completed(result: int, response_code: int, headers: PackedStr
 const DLQ_PATH = "user://ws_telemetry_dlq.json"
 
 ## Dispatches an impression to the telemetry endpoint via batching
-func dispatch_impression(placement_id: String, campaign_id: String, bid_id: String, origin: Vector3, frustum: Array) -> void:
+func dispatch_impression(placement_id: String, campaign_id: String, bid_id: String, origin: Vector3, frustum: Array, impression_token: String) -> void:
+	if impression_token.strip_edges().is_empty():
+		return
+		
 	if not _is_authenticated:
 		push_error("[WireSyndicate] Cannot dispatch telemetry: SDK lacks a valid session token.")
 		return
@@ -106,6 +109,7 @@ func dispatch_impression(placement_id: String, campaign_id: String, bid_id: Stri
 		"placement_id": placement_id,
 		"campaign_id": campaign_id,
 		"bid_id": bid_id,
+		"impression_token": impression_token,
 		"session_id": session_id,
 		"rendered_at": rendered_at,
 		"player_origin_geom": player_origin_geom,

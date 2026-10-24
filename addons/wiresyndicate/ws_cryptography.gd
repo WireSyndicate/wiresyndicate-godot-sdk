@@ -2,7 +2,7 @@ class_name WSCryptography
 
 ## Generates an HMAC-SHA256 signature for the given payload and secret.
 ## Matches the existing Unity SDK WSCryptography signature logic.
-static func generate_hmac(payload: String, secret: String) -> String:
+static func generate_hmac_sha256(payload: String, secret: String) -> String:
 	var context = HMACContext.new()
 	var error = context.start(HashingContext.HASH_SHA256, secret.to_utf8_buffer())
 	if error != OK:
@@ -17,3 +17,8 @@ static func generate_hmac(payload: String, secret: String) -> String:
 	var hmac_bytes = context.finish()
 	# Convert byte array to hexadecimal string manually or using packed byte array hex string encode
 	return hmac_bytes.hex_encode()
+
+## Backwards-compatible alias for generate_hmac_sha256
+static func generate_hmac(payload: String, secret: String) -> String:
+	return generate_hmac_sha256(payload, secret)
+
