@@ -32,7 +32,10 @@ class SDKDeliveryResponse:
 	var content_type: String
 	var asset_url: String
 	var click_url: String
+	var promo_code: String
+	var cta_overlay_text: String
 	var format: String
 	var prominence: String
 	var monetization_mode: String
 	var tracking: Variant
+

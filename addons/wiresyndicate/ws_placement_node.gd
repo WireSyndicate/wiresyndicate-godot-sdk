@@ -8,10 +8,14 @@ var _wire_syndicate: Node
 var _is_resolving: bool = false
 var active_bid_id: String = ""
 
+signal on_attribution_gaze_locked(promo_code: String, cta_overlay_text: String, click_url: String)
+
 # Live-Ops Delivery State
 var _resolved_content_type: String = ""
 var _resolved_tracking: Variant = null
 var _resolved_click_url: String = ""
+var _resolved_promo_code: String = ""
+var _resolved_cta_overlay_text: String = ""
 var _resolved_format: String = ""
 
 # VRAM & Material Reuse Cache
@@ -78,7 +82,9 @@ func _on_resolve_completed(result: int, response_code: int, headers: PackedStrin
 		
 	var asset_url = response.get("asset_url", "")
 	_resolved_content_type = response.get("content_type", "house")
-	_resolved_click_url = response.get("click_url", "")
+	_resolved_click_url = response.get("click_url", "") if response.get("click_url") != null else ""
+	_resolved_promo_code = response.get("promo_code", "") if response.get("promo_code") != null else ""
+	_resolved_cta_overlay_text = response.get("cta_overlay_text", "") if response.get("cta_overlay_text") != null else ""
 	_resolved_format = response.get("format", "").to_lower()
 	_resolved_tracking = response.get("tracking", null)
 	active_bid_id = response.get("placement_id", "")
@@ -179,6 +185,7 @@ func _apply_gltf_model(file_path: String, is_cache_hit: bool = false, asset_hash
 				
 		print("[WireSyndicate] Successfully instantiated GLTF model.")
 		_handle_telemetry_dispatch()
+		_check_and_emit_attribution()
 
 ## Executed on the main thread.
 ## Manages VRAM and material reuse for MeshInstance3D and Sprite3D.
@@ -216,6 +223,11 @@ func _apply_texture(image: Image, is_cache_hit: bool = false, asset_hash: String
 		return
 		
 	_handle_telemetry_dispatch()
+	_check_and_emit_attribution()
+
+func _check_and_emit_attribution() -> void:
+	if not _resolved_promo_code.is_empty() or not _resolved_cta_overlay_text.is_empty():
+		on_attribution_gaze_locked.emit(_resolved_promo_code, _resolved_cta_overlay_text, _resolved_click_url)
 
 ## Strict telemetry guard: Only dispatch telemetry when sponsored and impression_token is present.
 func _handle_telemetry_dispatch() -> void:
